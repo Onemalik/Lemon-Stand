@@ -289,12 +289,22 @@ class Simulation {
     return this.stand.history;
   }
 
+  /** Public, manual one-day runner. Supply a plan (from user input). */
+  runDayManual(day: number, plan: DayPlan, weather?: Weather, prices?: PriceList) {
+    const w = weather ?? this.forecast();
+    const p = prices ?? this.prices(day);
+    this.executeDay(plan, day, w, p);
+  }
+
   private runSingleDay(strategy: Strategy, day: number) {
     // Morning: forecast + prices -> player plan
     const weather = this.forecast();
     const prices = this.prices(day);
     const plan = strategy.planDay(this.stand, weather, prices, day);
+    this.executeDay(plan, day, weather, prices);
+  }
 
+  private executeDay(plan: DayPlan, day: number, weather: Weather, prices: PriceList) {
     // Execute purchase order
     const supplyCost =
       plan.order.lemons * prices.lemonPrice +
@@ -470,9 +480,107 @@ function runDemo() {
 // If running under ts-node or bundler, you can call runDemo().
 // runDemo();
 
-/***************************
- * Public API (for UI/hooks)
- ***************************/
+/*****************
+ * CLI Interface *
+ *****************/
+// Implements a day-at-a-time interactive loop using Node's official
+// promise-based readline API (Node v17+):
+// https://nodejs.org/api/readline.html (readline/promises)
+import { createInterface } from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
+
+async function askNumber(rl: ReturnType<typeof createInterface>, prompt: string, def: number, min = 0, max = Number.POSITIVE_INFINITY): Promise<number> {
+  while (true) {
+    const ans = (await rl.question(`${prompt} [default ${def}]: `)).trim();
+    if (ans === '') return def;
+    const v = Number(ans);
+    if (!Number.isNaN(v) && v >= min && v <= max) return v;
+    console.log(`Please enter a number between ${min} and ${max}.`);
+  }
+}
+
+async function askYesNo(rl: ReturnType<typeof createInterface>, prompt: string, def = false): Promise<boolean> {
+  const defText = def ? 'Y/n' : 'y/N';
+  while (true) {
+    const ans = (await rl.question(`${prompt} [${defText}]: `)).trim().toLowerCase();
+    if (ans === '') return def;
+    if (['y','yes'].includes(ans)) return true;
+    if (['n','no'].includes(ans)) return false;
+  }
+}
+
+async function runCLI() {
+  const rl = createInterface({ input, output });
+
+  console.log('🍋 Lemonade Stand — Day-by-Day CLI');
+  const startingCash = await askNumber(rl, 'Starting cash ($)', 10.00, 0);
+  let stand = new StandState(startingCash);
+  let sim = new Simulation(stand, 2025);
+
+  let day = 1;
+  while (true) {
+    console.log(`
+===== Day ${day} =====`);
+    const weather = sim.forecast();
+    const prices = sim.prices(day);
+
+    console.log(`Forecast: ${weather.forecast()} (${weather.tempF}°F)`);
+    console.log(`Prices — Lemons $${prices.lemonPrice.toFixed(2)}, Sugar/cup $${prices.sugarPrice.toFixed(2)}, Ice/cube $${prices.icePrice.toFixed(2)}, Cups $${prices.cupPrice.toFixed(2)}`);
+
+    // Let the player optionally adjust the recipe
+    console.log(`Current recipe: ${stand.recipe.lemonsPerPitcher} lemons/pitcher, ${stand.recipe.sugarCupsPerPitcher} sugar cups/pitcher, ${stand.recipe.iceCubesPerCup} ice/cup, ${stand.recipe.cupsPerPitcher} cups/pitcher.`);
+    const tweak = await askYesNo(rl, 'Adjust recipe?', false);
+    let recipe = stand.recipe;
+    if (tweak) {
+      const l = await askNumber(rl, 'Lemons per pitcher', recipe.lemonsPerPitcher, 1, 20);
+      const s = await askNumber(rl, 'Sugar cups per pitcher', recipe.sugarCupsPerPitcher, 0, 20);
+      const i = await askNumber(rl, 'Ice cubes per cup', recipe.iceCubesPerCup, 0, 20);
+      const c = await askNumber(rl, 'Cups per pitcher', recipe.cupsPerPitcher, 1, 25);
+      recipe = new Recipe(l, s, i, c);
+    }
+
+    // Purchases
+    const pricePerCup = await askNumber(rl, 'Set selling price per cup ($)', stand.pricePerCup, 0.01, 5);
+    const buyLemons = await askNumber(rl, 'Buy how many lemons?', 0, 0);
+    const buySugar = await askNumber(rl, 'Buy how many cups of sugar?', 0, 0);
+    const buyIce = await askNumber(rl, 'Buy how many ice cubes?', 0, 0);
+    const buyCups = await askNumber(rl, 'Buy how many paper cups?', 0, 0);
+
+    const plan: DayPlan = {
+      setPricePerCup: +pricePerCup.toFixed(2),
+      order: { lemons: buyLemons, sugarCups: buySugar, iceCubes: buyIce, cups: buyCups },
+      recipe,
+    };
+
+    try {
+      sim.runDayManual(day, plan, weather, prices);
+    } catch (e: any) {
+      console.error('Purchase error:', e.message ?? e);
+      const cont = await askYesNo(rl, 'Try a different order?', true);
+      if (cont) continue; else break;
+    }
+
+    const r = stand.history[stand.history.length - 1];
+    console.log(`
+Results — Day ${day}`);
+    console.log(`  Customers: ${r.customers}`);
+    console.log(`  Cups sold: ${r.cupsSold}`);
+    console.log(`  Revenue: $${r.grossRevenue.toFixed(2)}  Supplies cost: $${r.supplyCost.toFixed(2)}  Net: $${r.netProfit.toFixed(2)}`);
+    console.log(`  Leftover — Lemons: ${r.leftover.lemons}, Sugar: ${r.leftover.sugar}, Ice: ${r.leftover.ice}, Cups: ${r.leftover.cups}`);
+    console.log(`  Cash balance: $${stand.cash.toFixed(2)}`);
+
+    const goOn = await askYesNo(rl, 'Proceed to next day?', true);
+    if (!goOn) break;
+    day += 1;
+  }
+
+  console.log('Thanks for playing!');
+  rl.close();
+}
+
+// Exported so you can call with tsx/ts-node: `tsx lemonade-stand.ts --cli`
+export async function mainCLI() { await runCLI(); }
+
 export {
   WeatherKind,
   Weather,
